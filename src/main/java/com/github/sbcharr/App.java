@@ -10,7 +10,7 @@ import java.io.IOException;
 
 public class App {
   public static void main(String[] args) {
-    String streamType = System.getenv("BQ_WRITE_API_STREAM_TYPE");
+    String streamType = System.getProperty("BQ_WRITE_API_STREAM_TYPE");
     System.out.println("Stream type: " + streamType);
     try {
       if (StreamType.DEFAULT_SYNC.value().equals(streamType)) {
