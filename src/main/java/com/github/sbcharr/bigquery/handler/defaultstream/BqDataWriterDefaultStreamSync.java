@@ -24,6 +24,8 @@ public class BqDataWriterDefaultStreamSync {
   private static final String DATA_SET = "test_dataset";
   private static final String TABLE_NAME = "test_bq_api";
 
+  private static long totalTransferredBytes = 0;
+
   public static void runWriteToDefaultStream()
       throws DescriptorValidationException, InterruptedException, IOException {
     long t1 = System.currentTimeMillis();
@@ -33,7 +35,9 @@ public class BqDataWriterDefaultStreamSync {
             + (System.currentTimeMillis() - t1) / 1000
             + " seconds to write "
             + Constants.APPEND_BATCH_SIZE * Constants.TOTAL_BATCHES
-            + " records to BQ in SYNC mode");
+            + " records with total size "
+            + totalTransferredBytes / 1024
+            + " kilo bytes to BQ in SYNC mode");
   }
 
   public static void writeToDefaultStream()
@@ -49,20 +53,20 @@ public class BqDataWriterDefaultStreamSync {
     for (int i = 0; i < Constants.TOTAL_BATCHES; i++) {
       tempList.add(i);
     }
-    System.out.println("Record size: " + 500 + " Bytes");
+
     tempList.parallelStream()
         .forEach(
             idx -> {
               // Create a JSON object that is compatible with the table schema.
-              JSONArray jsonArr = new JSONArray();
+              JSONArray jsonArr = new JSONArray(1);
               BqTestTableDTO apiDTO = new BqTestTableDTO();
               for (int j = 0; j < Constants.APPEND_BATCH_SIZE; j++) {
-                apiDTO.field1 = Utils.generateRandomText(80);
-                apiDTO.field2 = Utils.generateRandomText(60);
-                apiDTO.field3 = Utils.generateRandomText(90);
-                apiDTO.field4 = Utils.generateRandomText(100);
-                apiDTO.field5 = Utils.generateRandomText(50);
-                apiDTO.field6 = Utils.generateRandomText(120);
+                apiDTO.field1 = Utils.generateRandomText(400);
+                apiDTO.field2 = Utils.generateRandomText(450);
+                apiDTO.field3 = Utils.generateRandomText(350);
+                apiDTO.field4 = Utils.generateRandomText(550);
+                apiDTO.field5 = Utils.generateRandomText(500);
+                apiDTO.field6 = Utils.generateRandomText(350);
 
                 JSONObject record = new JSONObject();
                 record.put("field1", apiDTO.field1);
@@ -72,6 +76,9 @@ public class BqDataWriterDefaultStreamSync {
                 record.put("field5", apiDTO.field5);
                 record.put("field6", apiDTO.field6);
 
+                synchronized ("lock") {
+                  totalTransferredBytes += Utils.getByteSizeOfJsonString(record.toString());
+                }
                 jsonArr.put(record);
               }
 
@@ -141,7 +148,7 @@ public class BqDataWriterDefaultStreamSync {
       try {
         AppendRowsResponse response = future.get();
         if (response.hasError()) {
-          System.out.println("Append records failed for the batch");
+          System.out.println("Failed to append records for the batch");
         }
       } catch (ExecutionException e) {
         e.printStackTrace();

@@ -25,23 +25,26 @@ import java.util.Map;
 import java.util.concurrent.Phaser;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import static com.github.sbcharr.Constants.APPEND_BATCH_SIZE;
+
+
 
 public class BqDataWriterDefaultStreamAsync {
   private static final String PROJECT_ID = "molten-optics-378412";
   private static final String DATA_SET = "test_dataset";
   private static final String TABLE_NAME = "test_bq_api";
 
+  private static long totalTransferredBytes = 0;
+
   public static void runWriteToDefaultStream()
       throws DescriptorValidationException, InterruptedException, IOException {
     long t1 = System.currentTimeMillis();
     writeToDefaultStream(PROJECT_ID, DATA_SET, TABLE_NAME);
     System.out.println(
-            "Took "
-                    + (System.currentTimeMillis() - t1) / 1000
-                    + " seconds to write "
-                    + APPEND_BATCH_SIZE * Constants.TOTAL_BATCHES
-                    + " records to BQ in ASYNC mode");
+        "Took "
+            + (System.currentTimeMillis() - t1) / 1000
+            + " seconds to write "
+            + Constants.APPEND_BATCH_SIZE * Constants.TOTAL_BATCHES
+            + " records with total size " + totalTransferredBytes/1024 + " kilo bytes to BQ in ASYNC mode");
   }
 
   public static void writeToDefaultStream(String projectId, String datasetName, String tableName)
@@ -57,7 +60,7 @@ public class BqDataWriterDefaultStreamAsync {
     for (int i = 0; i < Constants.TOTAL_BATCHES; i++) {
       tempList.add(i);
     }
-    System.out.println("Record size: " + 500 + " Bytes");
+    // System.out.println("Record size: " + 500 + " Bytes");
     tempList.parallelStream()
         .forEach(
             idx -> {
@@ -65,12 +68,12 @@ public class BqDataWriterDefaultStreamAsync {
               JSONArray jsonArr = new JSONArray();
               BqTestTableDTO apiDTO = new BqTestTableDTO();
               for (int j = 0; j < Constants.APPEND_BATCH_SIZE; j++) {
-                apiDTO.field1 = Utils.generateRandomText(80);
-                apiDTO.field2 = Utils.generateRandomText(60);
-                apiDTO.field3 = Utils.generateRandomText(90);
-                apiDTO.field4 = Utils.generateRandomText(100);
-                apiDTO.field5 = Utils.generateRandomText(50);
-                apiDTO.field6 = Utils.generateRandomText(120);
+                apiDTO.field1 = Utils.generateRandomText(400);
+                apiDTO.field2 = Utils.generateRandomText(450);
+                apiDTO.field3 = Utils.generateRandomText(350);
+                apiDTO.field4 = Utils.generateRandomText(550);
+                apiDTO.field5 = Utils.generateRandomText(500);
+                apiDTO.field6 = Utils.generateRandomText(350);
 
                 JSONObject record = new JSONObject();
                 record.put("field1", apiDTO.field1);
@@ -85,13 +88,13 @@ public class BqDataWriterDefaultStreamAsync {
                 //        }
                 //        record.put("test_string", String.format("record %03d-%03d %s", i, j,
                 // sbSuffix.toString()));
+                synchronized ("lock") {
+                  totalTransferredBytes += Utils.getByteSizeOfJsonString(record.toString());
+                }
                 jsonArr.put(record);
               }
 
               try {
-                if (writer.isClosedStreamWriter()) {
-                  writer.initialize(parentTable);
-                }
                 writer.append(new AppendContext(jsonArr, 0));
               } catch (DescriptorValidationException | IOException | InterruptedException e) {
                 e.printStackTrace();
@@ -131,7 +134,11 @@ public class BqDataWriterDefaultStreamAsync {
     // Track the number of in-flight requests to wait for all responses before shutting down.
     private final Phaser inflightRequestCount = new Phaser(1);
     private final Object lock = new Object();
-    private JsonStreamWriter streamWriter;
+    private JsonStreamWriter streamWriter1;
+    private JsonStreamWriter streamWriter2;
+    private JsonStreamWriter streamWriter3;
+    private List<JsonStreamWriter> streamWriters;
+    private int streamWriterIndex;
 
     @GuardedBy("lock")
     private RuntimeException error = null;
@@ -140,35 +147,60 @@ public class BqDataWriterDefaultStreamAsync {
 
     public void initialize(TableName parentTable)
         throws DescriptorValidationException, IOException, InterruptedException {
-      streamWriter =
+      streamWriter1 =
           JsonStreamWriter.newBuilder(parentTable.toString(), BigQueryWriteClient.create()).build();
+      streamWriter2 =
+          JsonStreamWriter.newBuilder(parentTable.toString(), BigQueryWriteClient.create()).build();
+      streamWriter3 =
+          JsonStreamWriter.newBuilder(parentTable.toString(), BigQueryWriteClient.create()).build();
+      addStreamWriters();
     }
 
-    public boolean isClosedStreamWriter() {
-      return streamWriter == null;
+    private List<JsonStreamWriter> getStreamWriters() {
+      return streamWriters;
     }
+
+    private void addStreamWriters() {
+      streamWriters = new ArrayList<>();
+      streamWriters.add(streamWriter1);
+      streamWriters.add(streamWriter2);
+      streamWriters.add(streamWriter3);
+    }
+
+    //    public boolean isClosedStreamWriter() {
+    //      return streamWriter == null;
+    //    }
 
     public void append(AppendContext appendContext)
         throws DescriptorValidationException, IOException, InterruptedException {
       synchronized (this.lock) {
-        if (!streamWriter.isUserClosed()
-            && streamWriter.isClosed()
+        if (streamWriterIndex == streamWriters.size()) {
+          streamWriterIndex = 0;
+        }
+        if (!streamWriters.get(streamWriterIndex).isUserClosed()
+            && streamWriters.get(streamWriterIndex).isClosed()
             && recreateCount.getAndIncrement() < MAX_RECREATE_COUNT) {
-          streamWriter =
+          JsonStreamWriter streamWriter =
               JsonStreamWriter.newBuilder(
-                      streamWriter.getStreamName(), BigQueryWriteClient.create())
+                      streamWriters.get(streamWriterIndex).getStreamName(),
+                      BigQueryWriteClient.create())
                   .build();
+          streamWriters.set(streamWriterIndex, streamWriter);
           this.error = null;
         }
         // If earlier appends have failed, we need to reset before continuing.
         if (this.error != null) {
           throw this.error;
         }
+        streamWriterIndex++;
       }
       long t1 = System.currentTimeMillis();
-      ApiFuture<AppendRowsResponse> future = streamWriter.append(appendContext.data);
-//      System.out.println(
-//          "took " + (System.currentTimeMillis() - t1) + " millis to get the append future object");
+      ApiFuture<AppendRowsResponse> future =
+          streamWriters.get(streamWriterIndex - 1).append(appendContext.data);
+//      System.out.println("stream writer at index " + (streamWriterIndex - 1) + " has writer " + streamWriters.get(streamWriterIndex - 1));
+      //      System.out.println(
+      //          "took " + (System.currentTimeMillis() - t1) + " millis to get the append future
+      // object");
       ApiFutures.addCallback(
           future, new AppendCompleteCallback(this, appendContext), MoreExecutors.directExecutor());
 
@@ -178,7 +210,9 @@ public class BqDataWriterDefaultStreamAsync {
     public void cleanup() {
       // Wait for all in-flight requests to complete.
       inflightRequestCount.arriveAndAwaitAdvance();
-      streamWriter.close();
+      for (JsonStreamWriter streamWriter : streamWriters) {
+        streamWriter.close();
+      }
 
       // Verify that no error occurred in the stream.
       synchronized (this.lock) {
@@ -205,6 +239,7 @@ public class BqDataWriterDefaultStreamAsync {
       }
 
       public void onFailure(Throwable throwable) {
+        System.out.println("Append failed");
         Status status = Status.fromThrowable(throwable);
         if (appendContext.retryCount < MAX_RETRY_COUNT
             && RETRIABLE_ERROR_CODES.contains(status.getCode())) {
